@@ -337,6 +337,31 @@ def db_agents_fan_out(session: requests.Session) -> list[dict]:
     return infos
 
 
+def make_python_agent_source(label: str) -> Callable[[requests.Session], dict]:
+    """Read PyPI's JSON API for the latest whatap-python sdist (filename,
+    upload time, size, version, and download URL)."""
+    def fetch(session: requests.Session) -> dict:
+        resp = session.get("https://pypi.org/pypi/whatap-python/json", timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        version = data["info"]["version"]
+        sdist = next(
+            (f for f in data["urls"] if f.get("packagetype") == "sdist"),
+            None,
+        )
+        if sdist is None:
+            raise RuntimeError("no sdist found for whatap-python on PyPI")
+        return {
+            "label": label,
+            "filename": sdist["filename"],
+            "download_url": sdist["url"],
+            "timestamp_kst": utc_iso_to_kst_string(sdist["upload_time_iso_8601"]),
+            "size": sdist["size"],
+            "version": version,
+        }
+    return fetch
+
+
 def make_java_agent_source(label: str) -> Callable[[requests.Session], dict]:
     """Read maven-metadata-local.xml for the latest version + lastUpdated.
     The download URL is the fixed alias on api.whatap.io."""
@@ -391,19 +416,26 @@ CATEGORIES: list[dict] = [
     },
     {
         "title": "Java 에이전트",
-        "summary_prefix": "Java",
+        "summary_prefix": "APM) Java",
         "sources": [
             make_java_agent_source("Java"),
         ],
     },
     {
+        "title": "Python 에이전트",
+        "summary_prefix": "APM) Python",
+        "sources": [
+            make_python_agent_source("Python"),
+        ],
+    },
+    {
         "title": "DB 에이전트",
-        "summary_prefix": "DB",
+        "summary_prefix": "DB)",
         "fan_out_source": db_agents_fan_out,
     },
     {
         "title": "서버 에이전트 (RHEL 계열)",
-        "summary_prefix": "RHEL",
+        "summary_prefix": "SERVER) RHEL",
         "sources": [
             versioned_filename_source(
                 "centos/latest/x86_64/",
@@ -421,7 +453,7 @@ CATEGORIES: list[dict] = [
     },
     {
         "title": "서버 에이전트 (Ubuntu 계열)",
-        "summary_prefix": "Ubuntu",
+        "summary_prefix": "SERVER) Ubuntu",
         "sources": [
             versioned_filename_source(
                 "debian/unstable/",
@@ -439,7 +471,7 @@ CATEGORIES: list[dict] = [
     },
     {
         "title": "서버 에이전트 (Windows)",
-        "summary_prefix": "Windows",
+        "summary_prefix": "SERVER) Windows",
         "sources": [
             fixed_filename_source(
                 "windows/",
