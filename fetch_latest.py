@@ -200,6 +200,19 @@ def build_payload(info: dict) -> dict:
     }
 
 
+def build_title_payload() -> dict:
+    """Header-only message used as a daily title above the package list."""
+    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
+    title = f"WhaTap 일일 패키지 알림 - {now_kst}"
+    return {
+        "text": title,
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": title}},
+            {"type": "divider"},
+        ],
+    }
+
+
 def post_to_slack(webhook_url: str, payload: dict) -> None:
     """POST to Slack, logging status + body. Retries once on 429 honoring Retry-After."""
     for attempt in (1, 2):
@@ -266,13 +279,27 @@ def main() -> int:
 
     session = requests.Session()
     failures = 0
-    for i, source in enumerate(SOURCES):
-        if i > 0 and not dry_run:
+
+    title_payload = build_title_payload()
+    print(f"=== title ===\n  {title_payload['text']}")
+    if dry_run:
+        print("  DRY_RUN=1, skipping Slack post")
+    elif webhook:
+        try:
+            post_to_slack(webhook, title_payload)
+            print("  posted to Slack")
+        except Exception as e:
+            print(f"  ERROR posting title to Slack: {e}", file=sys.stderr)
+            failures += 1
+
+    for source in SOURCES:
+        if not dry_run:
             time.sleep(SLACK_POST_GAP_SEC)
         if not process_source(source, session, webhook, dry_run):
             failures += 1
+
     if failures:
-        print(f"\n{failures} source(s) failed", file=sys.stderr)
+        print(f"\n{failures} message(s) failed", file=sys.stderr)
         return 1
     return 0
 
