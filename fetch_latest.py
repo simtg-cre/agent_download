@@ -229,37 +229,52 @@ def make_java_agent_source(label: str) -> Callable[[requests.Session], dict]:
 
 CATEGORIES: list[dict] = [
     {
-        "title": "일반 패키지",
+        "title": "수집서버",
         "sources": [
-            s3_prefix_source("package/latest/", "package/latest"),
-            s3_prefix_source("rum-onpremise-allinone/", "RUM 올인원"),
-            make_java_agent_source("Java 에이전트"),
+            s3_prefix_source("package/latest/", "수집서버"),
         ],
     },
     {
-        "title": "서버 에이전트 (Linux)",
+        "title": "브라우저",
+        "sources": [
+            s3_prefix_source("rum-onpremise-allinone/", "브라우저"),
+        ],
+    },
+    {
+        "title": "Java 에이전트",
+        "sources": [
+            make_java_agent_source("Java"),
+        ],
+    },
+    {
+        "title": "서버 에이전트 (RHEL 계열)",
         "sources": [
             versioned_filename_source(
                 "centos/latest/x86_64/",
-                "RHEL/CentOS x86_64",
+                "x86_64",
                 re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.x86_64\.rpm$"),
                 "{0}.{1}-{2}",
             ),
             versioned_filename_source(
                 "centos/latest/aarch64/",
-                "RHEL/CentOS aarch64",
+                "aarch64",
                 re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.aarch64\.rpm$"),
                 "{0}.{1}-{2}",
             ),
+        ],
+    },
+    {
+        "title": "서버 에이전트 (Ubuntu 계열)",
+        "sources": [
             versioned_filename_source(
                 "debian/unstable/",
-                "Ubuntu/Debian amd64",
+                "amd64",
                 re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_amd64\.deb$"),
                 "{0}.{1}.{2}",
             ),
             versioned_filename_source(
                 "debian/unstable/",
-                "Ubuntu/Debian arm64",
+                "arm64",
                 re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_arm64\.deb$"),
                 "{0}.{1}.{2}",
             ),
@@ -288,10 +303,12 @@ def _short_timestamp(ts_kst: str) -> str:
 
 
 def build_category_payload(category_title: str, infos: list[dict]) -> dict:
-    headers = ["구분", "파일명", "Version", "Timestamp", "Size"]
+    # Drop the 구분 column when there is only one row (it'd just repeat
+    # the category header).
+    show_label_col = len(infos) > 1
+    headers = (["구분"] if show_label_col else []) + ["파일명", "Version", "Timestamp", "Size"]
     rows = [
-        [
-            info["label"],
+        ([info["label"]] if show_label_col else []) + [
             info["filename"],
             info.get("version") or "-",
             _short_timestamp(info["timestamp_kst"]),
