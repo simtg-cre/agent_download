@@ -1,12 +1,13 @@
-"""Find the most recently modified file under the WhaTap S3 bucket
-prefix `package/latest/` and post the filename, download URL, KST
+"""For each configured S3 prefix on the WhaTap repo, find the most
+recently modified file and post the filename, download URL, KST
 timestamp, and size to a Slack channel via Incoming Webhook.
 
 Required env:
     SLACK_WEBHOOK_URL   Slack Incoming Webhook URL.
 
 Optional env:
-    PREFIX              S3 prefix to scan. Default: "package/latest/".
+    PREFIXES            Comma-separated list of S3 prefixes to scan.
+                        Default: PREFIXES_DEFAULT below.
     DRY_RUN             If "1"/"true", skip the Slack POST and just print.
 """
 
@@ -24,15 +25,23 @@ import requests
 # silently ignores `prefix` / `max-keys`, so we go straight to S3.
 S3_ENDPOINT = "https://s3.ap-northeast-2.amazonaws.com/repo.whatap.io/"
 PUBLIC_DOWNLOAD_PREFIX = "https://repo.whatap.io/"
-DEFAULT_PREFIX = "package/latest/"
 S3_NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 KST = timezone(timedelta(hours=9))
 
+PREFIXES_DEFAULT = [
+    "package/latest/",
+    "rum-onpremise-allinone/",
+]
 
-def list_objects(prefix: str) -> list[dict]:
-    """List S3 objects directly under `prefix` (using delimiter='/'),
-    paginating if needed."""
-    session = requests.Session()
+# Friendly section header per prefix. Falls back to the prefix string.
+PREFIX_LABELS = {
+    "package/latest/": "WhaTap 최신 패키지 (package/latest)",
+    "rum-onpremise-allinone/": "RUM 온프레미스 All-in-one",
+}
+
+
+def list_objects(prefix: str, session: requests.Session) -> list[dict]:
+    """List S3 objects directly under `prefix` (delimiter='/'), paginating if needed."""
     objects: list[dict] = []
     marker = ""
     while True:
@@ -78,19 +87,20 @@ def human_size(num_bytes: int) -> str:
     return f"{size:.2f} TB"
 
 
-def build_payload(file_info: dict) -> dict:
+def build_payload(prefix: str, file_info: dict) -> dict:
     key = file_info["key"]
     filename = key.rsplit("/", 1)[-1]
     download_url = PUBLIC_DOWNLOAD_PREFIX + key
     timestamp_kst = to_kst_string(file_info["last_modified"])
     size_str = human_size(file_info["size"])
+    label = PREFIX_LABELS.get(prefix, prefix.rstrip("/"))
 
     return {
-        "text": f"WhaTap latest package: {filename}",
+        "text": f"{label}: {filename}",
         "blocks": [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": "WhaTap 최신 패키지"},
+                "text": {"type": "plain_text", "text": label},
             },
             {
                 "type": "section",
@@ -110,17 +120,21 @@ def post_to_slack(webhook_url: str, payload: dict) -> None:
     resp.raise_for_status()
 
 
-def main() -> int:
-    prefix = os.environ.get("PREFIX", DEFAULT_PREFIX)
-    dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+def process_prefix(prefix: str, session: requests.Session, webhook: Optional[str], dry_run: bool) -> bool:
+    """Returns True on success, False on failure."""
+    print(f"\n=== prefix: {prefix} ===")
+    try:
+        objects = list_objects(prefix, session)
+    except Exception as e:
+        print(f"ERROR listing '{prefix}': {e}", file=sys.stderr)
+        return False
 
-    objects = list_objects(prefix)
     if not objects:
-        print(f"ERROR: no files found under '{prefix}'", file=sys.stderr)
-        return 1
+        print(f"WARN: no files under '{prefix}'", file=sys.stderr)
+        return False
 
     latest = find_latest(objects)
-    payload = build_payload(latest)
+    payload = build_payload(prefix, latest)
 
     print(f"scanned files:     {len(objects)}")
     print(f"latest key:        {latest['key']}")
@@ -130,15 +144,41 @@ def main() -> int:
 
     if dry_run:
         print("DRY_RUN=1, skipping Slack post")
-        return 0
+        return True
 
-    webhook = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook:
+        print("ERROR: SLACK_WEBHOOK_URL is not set", file=sys.stderr)
+        return False
+
+    try:
+        post_to_slack(webhook, payload)
+    except Exception as e:
+        print(f"ERROR posting '{prefix}' to Slack: {e}", file=sys.stderr)
+        return False
+
+    print("posted to Slack")
+    return True
+
+
+def main() -> int:
+    prefixes_env = os.environ.get("PREFIXES", "").strip()
+    if prefixes_env:
+        prefixes = [p.strip() for p in prefixes_env.split(",") if p.strip()]
+    else:
+        prefixes = list(PREFIXES_DEFAULT)
+
+    dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+    webhook = os.environ.get("SLACK_WEBHOOK_URL")
+
+    if not dry_run and not webhook:
         print("ERROR: SLACK_WEBHOOK_URL is not set", file=sys.stderr)
         return 1
 
-    post_to_slack(webhook, payload)
-    print("posted to Slack")
+    session = requests.Session()
+    failures = [p for p in prefixes if not process_prefix(p, session, webhook, dry_run)]
+    if failures:
+        print(f"\nFAILED prefixes: {failures}", file=sys.stderr)
+        return 1
     return 0
 
 
