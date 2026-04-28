@@ -203,7 +203,7 @@ def build_payload(info: dict) -> dict:
 def build_title_payload() -> dict:
     """Header-only message used as a daily title above the package list."""
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
-    title = f"WhaTap 일일 패키지 알림 - {now_kst}"
+    title = f"\U0001F4E6 WhaTap 일일 패키지 알림 - {now_kst}"
     return {
         "text": title,
         "blocks": [
@@ -271,6 +271,14 @@ def process_source(
 
 
 def main() -> int:
+    # Make local prints survive non-UTF-8 consoles (Windows cp949 etc.).
+    # No-op on UTF-8 environments like GitHub Actions runners.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
     dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
     webhook = os.environ.get("SLACK_WEBHOOK_URL")
     if not dry_run and not webhook:
