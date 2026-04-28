@@ -230,24 +230,28 @@ def make_java_agent_source(label: str) -> Callable[[requests.Session], dict]:
 CATEGORIES: list[dict] = [
     {
         "title": "수집서버",
+        "summary_prefix": "수집서버",
         "sources": [
             s3_prefix_source("package/latest/", "수집서버"),
         ],
     },
     {
         "title": "브라우저",
+        "summary_prefix": "브라우저",
         "sources": [
             s3_prefix_source("rum-onpremise-allinone/", "브라우저"),
         ],
     },
     {
         "title": "Java 에이전트",
+        "summary_prefix": "Java",
         "sources": [
             make_java_agent_source("Java"),
         ],
     },
     {
         "title": "서버 에이전트 (RHEL 계열)",
+        "summary_prefix": "RHEL",
         "sources": [
             versioned_filename_source(
                 "centos/latest/x86_64/",
@@ -265,6 +269,7 @@ CATEGORIES: list[dict] = [
     },
     {
         "title": "서버 에이전트 (Ubuntu 계열)",
+        "summary_prefix": "Ubuntu",
         "sources": [
             versioned_filename_source(
                 "debian/unstable/",
@@ -282,6 +287,7 @@ CATEGORIES: list[dict] = [
     },
     {
         "title": "서버 에이전트 (Windows)",
+        "summary_prefix": "Windows",
         "sources": [
             fixed_filename_source(
                 "windows/",
@@ -344,6 +350,59 @@ def build_category_payload(category_title: str, infos: list[dict]) -> dict:
     }
 
 
+def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
+    """Build a final consolidated table covering every category at once.
+
+    `collected` is a list of (category, info) tuples in the order they were
+    processed. The 구분 column combines each category's summary_prefix with
+    the per-source label when the category has multiple sources, and is just
+    the prefix when single-source."""
+    headers = ["구분", "파일명", "Version", "Timestamp", "Size"]
+    rows: list[list[str]] = []
+    for category, info in collected:
+        multi = len(category["sources"]) > 1
+        label = (
+            f"{category['summary_prefix']} {info['label']}"
+            if multi
+            else category["summary_prefix"]
+        )
+        rows.append([
+            label,
+            info["filename"],
+            info.get("version") or "-",
+            _short_timestamp(info["timestamp_kst"]),
+            human_size(info["size"]) if info.get("size") is not None else "-",
+        ])
+
+    widths = [
+        max(display_width(headers[i]), max((display_width(r[i]) for r in rows), default=0))
+        for i in range(len(headers))
+    ]
+
+    def fmt_row(cells: list[str]) -> str:
+        return "  ".join(pad_right(c, widths[i]) for i, c in enumerate(cells))
+
+    sep = ["-" * widths[i] for i in range(len(headers))]
+    table_lines = [fmt_row(headers), fmt_row(sep)] + [fmt_row(r) for r in rows]
+    table_block = "```\n" + "\n".join(table_lines) + "\n```"
+
+    download_lines = "\n".join(
+        f":arrow_down: <{info['download_url']}|{info['filename']}>"
+        for _, info in collected
+    )
+
+    title = "\U0001F4CB 전체 다운로드 한눈에 보기"
+    return {
+        "text": title,
+        "blocks": [
+            {"type": "divider"},
+            {"type": "header", "text": {"type": "plain_text", "text": title}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": table_block}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": download_lines}},
+        ],
+    }
+
+
 def build_title_payload() -> dict:
     """Header-only message used as a daily title above the package list."""
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
@@ -381,9 +440,11 @@ def process_category(
     session: requests.Session,
     webhook: Optional[str],
     dry_run: bool,
-) -> bool:
+) -> tuple[bool, list[dict]]:
     """Fetch every source in the category, build one combined Slack message
-    with a multi-row table, and post it. Returns True if no errors."""
+    with a multi-row table, and post it. Returns (success, infos) — infos
+    is the list of successfully fetched source dicts (empty on full failure)
+    so the caller can build a final summary across all categories."""
     title = category["title"]
     print(f"\n=== {title} ===")
     infos: list[dict] = []
@@ -405,23 +466,23 @@ def process_category(
 
     if not infos:
         print("  no rows fetched; skipping Slack post", file=sys.stderr)
-        return False
+        return False, []
 
     payload = build_category_payload(title, infos)
 
     if dry_run:
         print("  DRY_RUN=1, skipping Slack post")
-        return fetch_failures == 0
+        return fetch_failures == 0, infos
     if not webhook:
         print("  ERROR: SLACK_WEBHOOK_URL is not set", file=sys.stderr)
-        return False
+        return False, infos
     try:
         post_to_slack(webhook, payload)
     except Exception as e:
         print(f"  ERROR posting to Slack: {e}", file=sys.stderr)
-        return False
+        return False, infos
     print("  posted to Slack")
-    return fetch_failures == 0
+    return fetch_failures == 0, infos
 
 
 def main() -> int:
@@ -454,11 +515,31 @@ def main() -> int:
             print(f"  ERROR posting title to Slack: {e}", file=sys.stderr)
             failures += 1
 
+    collected: list[tuple[dict, dict]] = []
     for category in CATEGORIES:
         if not dry_run:
             time.sleep(SLACK_POST_GAP_SEC)
-        if not process_category(category, session, webhook, dry_run):
+        success, infos = process_category(category, session, webhook, dry_run)
+        if not success:
             failures += 1
+        for info in infos:
+            collected.append((category, info))
+
+    # Final consolidated summary across every category we successfully fetched.
+    if collected:
+        if not dry_run:
+            time.sleep(SLACK_POST_GAP_SEC)
+        summary_payload = build_summary_payload(collected)
+        print(f"\n=== summary ({len(collected)} rows) ===")
+        if dry_run:
+            print("  DRY_RUN=1, skipping Slack post")
+        elif webhook:
+            try:
+                post_to_slack(webhook, summary_payload)
+                print("  posted to Slack")
+            except Exception as e:
+                print(f"  ERROR posting summary to Slack: {e}", file=sys.stderr)
+                failures += 1
 
     if failures:
         print(f"\n{failures} message(s) failed", file=sys.stderr)
