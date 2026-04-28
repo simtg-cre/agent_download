@@ -195,6 +195,83 @@ def fixed_filename_source(
     return fetch
 
 
+ECR_GALLERY_API = "https://api.us-east-1.gallery.ecr.aws"
+ECR_GALLERY_HEADERS = {
+    "content-type": "application/json",
+    "origin": "https://gallery.ecr.aws",
+    "referer": "https://gallery.ecr.aws/",
+    "user-agent": "Mozilla/5.0",
+}
+
+
+def k8s_repos_fan_out(session: requests.Session) -> list[dict]:
+    """Fetch every repository under the WhaTap public ECR alias and, for each,
+    return the most recently pushed image tag as one info dict.
+
+    This is a "fan-out" source: a single call expands into N table rows
+    (currently 9 - one per repo). Repos with no tags still get a row so
+    they are visible at a glance, but with placeholder fields."""
+    # 1) list all repos under whatap alias
+    r = session.post(
+        f"{ECR_GALLERY_API}/describeRepositoryCatalogData",
+        headers=ECR_GALLERY_HEADERS,
+        json={"registryAliasName": "whatap", "maxResults": 100},
+        timeout=30,
+    )
+    r.raise_for_status()
+    repos = [x["repositoryName"] for x in r.json().get("repositories", [])]
+
+    infos: list[dict] = []
+    for repo in repos:
+        # 2) paginate tags and pick the most recently pushed
+        all_tags: list[dict] = []
+        next_token: Optional[str] = None
+        while True:
+            body = {
+                "registryAliasName": "whatap",
+                "repositoryName": repo,
+                "maxResults": 1000,
+            }
+            if next_token:
+                body["nextToken"] = next_token
+            r = session.post(
+                f"{ECR_GALLERY_API}/describeImageTags",
+                headers=ECR_GALLERY_HEADERS,
+                json=body,
+                timeout=30,
+            )
+            r.raise_for_status()
+            j = r.json()
+            all_tags.extend(j.get("imageTagDetails", []))
+            next_token = j.get("nextToken")
+            if not next_token:
+                break
+
+        gallery_url = f"https://gallery.ecr.aws/whatap/{repo}"
+        if not all_tags:
+            infos.append({
+                "label": repo,
+                "filename": "(no tags)",
+                "download_url": gallery_url,
+                "timestamp_kst": "-",
+                "size": None,
+                "version": None,
+            })
+            continue
+
+        latest = max(all_tags, key=lambda t: t["imageDetail"]["imagePushedAt"])
+        tag = latest["imageTag"]
+        infos.append({
+            "label": repo,
+            "filename": f"public.ecr.aws/whatap/{repo}:{tag}",
+            "download_url": gallery_url,
+            "timestamp_kst": utc_iso_to_kst_string(latest["imageDetail"]["imagePushedAt"]),
+            "size": latest["imageDetail"]["imageSizeInBytes"],
+            "version": tag,
+        })
+    return infos
+
+
 def make_java_agent_source(label: str) -> Callable[[requests.Session], dict]:
     """Read maven-metadata-local.xml for the latest version + lastUpdated.
     The download URL is the fixed alias on api.whatap.io."""
@@ -241,6 +318,11 @@ CATEGORIES: list[dict] = [
         "sources": [
             s3_prefix_source("rum-onpremise-allinone/", "브라우저"),
         ],
+    },
+    {
+        "title": "K8s (Kubernetes)",
+        "summary_prefix": "K8s",
+        "fan_out_source": k8s_repos_fan_out,
     },
     {
         "title": "Java 에이전트",
@@ -358,9 +440,13 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
     the per-source label when the category has multiple sources, and is just
     the prefix when single-source."""
     headers = ["구분", "파일명", "Version", "Timestamp", "Size"]
+    # Count rows per category (use id() since categories aren't hashable as dicts).
+    cat_row_counts: dict[int, int] = {}
+    for cat, _ in collected:
+        cat_row_counts[id(cat)] = cat_row_counts.get(id(cat), 0) + 1
     rows: list[list[str]] = []
     for category, info in collected:
-        multi = len(category["sources"]) > 1
+        multi = cat_row_counts[id(category)] > 1
         label = (
             f"{category['summary_prefix']} {info['label']}"
             if multi
@@ -449,20 +535,37 @@ def process_category(
     print(f"\n=== {title} ===")
     infos: list[dict] = []
     fetch_failures = 0
-    for source in category["sources"]:
+
+    fan_out = category.get("fan_out_source")
+    if fan_out is not None:
+        # One callable produces all rows for the category at once.
         try:
-            info = source(session)
+            infos = list(fan_out(session))
         except Exception as e:
             fetch_failures += 1
-            print(f"  ERROR fetching source: {e}", file=sys.stderr)
-            continue
-        infos.append(info)
-        print(
-            f"  ok: [{info['label']}] {info['filename']}"
-            + (f"  v{info['version']}" if info.get("version") else "")
-            + f"  {_short_timestamp(info['timestamp_kst'])}"
-            + (f"  {human_size(info['size'])}" if info.get("size") is not None else "")
-        )
+            print(f"  ERROR fan-out source: {e}", file=sys.stderr)
+        for info in infos:
+            print(
+                f"  ok: [{info['label']}] {info['filename']}"
+                + (f"  v{info['version']}" if info.get("version") else "")
+                + f"  {_short_timestamp(info['timestamp_kst'])}"
+                + (f"  {human_size(info['size'])}" if info.get("size") is not None else "")
+            )
+    else:
+        for source in category.get("sources", []):
+            try:
+                info = source(session)
+            except Exception as e:
+                fetch_failures += 1
+                print(f"  ERROR fetching source: {e}", file=sys.stderr)
+                continue
+            infos.append(info)
+            print(
+                f"  ok: [{info['label']}] {info['filename']}"
+                + (f"  v{info['version']}" if info.get("version") else "")
+                + f"  {_short_timestamp(info['timestamp_kst'])}"
+                + (f"  {human_size(info['size'])}" if info.get("size") is not None else "")
+            )
 
     if not infos:
         print("  no rows fetched; skipping Slack post", file=sys.stderr)
