@@ -5,6 +5,9 @@ on:
     # 23:00 UTC == 08:00 KST (next day).
     - cron: "0 23 * * *"
   workflow_dispatch:
+  repository_dispatch:
+    # Triggered by Slack /새로고침 via Cloudflare Worker bridge.
+    types: [slack-refresh]
 
 jobs:
   notify:
