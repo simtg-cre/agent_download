@@ -31,9 +31,9 @@ PUBLIC_DOWNLOAD_PREFIX = "https://repo.whatap.io/"
 S3_NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 KST = timezone(timedelta(hours=9))
 
-# Slack Incoming Webhooks throttle to ~1 msg/sec per hook; without a small
-# gap between consecutive POSTs the second message can come back 429.
-SLACK_POST_GAP_SEC = 1.2
+# Slack Incoming Webhooks throttle to ~1 msg/sec per hook, but in practice
+# bursts get rejected even at 1.2s. 2.5s leaves comfortable headroom.
+SLACK_POST_GAP_SEC = 2.5
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +201,18 @@ def build_payload(info: dict) -> dict:
 
 
 def post_to_slack(webhook_url: str, payload: dict) -> None:
-    resp = requests.post(webhook_url, json=payload, timeout=30)
-    resp.raise_for_status()
+    """POST to Slack, logging status + body. Retries once on 429 honoring Retry-After."""
+    for attempt in (1, 2):
+        resp = requests.post(webhook_url, json=payload, timeout=30)
+        body = (resp.text or "").strip()
+        print(f"  slack response (attempt {attempt}): status={resp.status_code} body={body[:200]!r}")
+        if resp.status_code == 429 and attempt == 1:
+            wait = float(resp.headers.get("Retry-After", "5"))
+            print(f"  rate-limited; sleeping {wait}s before retry")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        return
 
 
 # ---------------------------------------------------------------------------
