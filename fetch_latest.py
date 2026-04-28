@@ -282,6 +282,61 @@ def k8s_repos_fan_out(session: requests.Session) -> list[dict]:
     return infos
 
 
+DB_AGENT_TYPES = [
+    ("MySQL", "mysql"),
+    ("Oracle", "oracle"),
+    ("PostgreSQL", "postgresql"),
+]
+
+
+def db_agents_fan_out(session: requests.Session) -> list[dict]:
+    """For each DB type the user cares about, surface the same canonical
+    metadata (version + last-modified timestamp) but with the type-specific
+    download URL on service.whatap.io. The download endpoint serves slightly
+    different bytes per type (per-DB config injection) but the underlying
+    binary is the same `whatap.agent.database.tar.gz` published in S3, so we
+    use that S3 file's LastModified as the row timestamp and read the version
+    out of `agent/dbx/LATEST_VERSION` on the same bucket. Per-URL Content-Length
+    is not exposed by the dynamic download endpoint, so Size is omitted."""
+    # 1) read LATEST_VERSION (plain text, e.g. "VERSION = 2.60.09\nBUILD = 20260427")
+    latest_url = PUBLIC_DOWNLOAD_PREFIX + "agent/dbx/LATEST_VERSION"
+    resp = session.get(latest_url, timeout=30)
+    resp.raise_for_status()
+    version: Optional[str] = None
+    for line in resp.text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("VERSION"):
+            _, _, val = stripped.partition("=")
+            version = val.strip() or None
+            break
+    if not version:
+        raise RuntimeError(f"VERSION missing in {latest_url}")
+
+    # 2) get S3 LastModified for the actual tarball
+    s3_key = "agent/dbx/dbx/whatap.agent.database.tar.gz"
+    objs = list_s3_objects("agent/dbx/dbx/", session)
+    target = next((o for o in objs if o["key"] == s3_key), None)
+    if target is None:
+        raise RuntimeError(f"{s3_key} not found in repo bucket")
+    timestamp_kst = utc_iso_to_kst_string(target["last_modified"])
+
+    # 3) one row per DB type
+    infos: list[dict] = []
+    for label, type_param in DB_AGENT_TYPES:
+        download_url = (
+            f"https://service.whatap.io/download/dbx_agent?type={type_param}&format=tar.gz"
+        )
+        infos.append({
+            "label": label,
+            "filename": "whatap.agent.database.tar.gz",
+            "download_url": download_url,
+            "timestamp_kst": timestamp_kst,
+            "size": None,
+            "version": version,
+        })
+    return infos
+
+
 def make_java_agent_source(label: str) -> Callable[[requests.Session], dict]:
     """Read maven-metadata-local.xml for the latest version + lastUpdated.
     The download URL is the fixed alias on api.whatap.io."""
@@ -340,6 +395,11 @@ CATEGORIES: list[dict] = [
         "sources": [
             make_java_agent_source("Java"),
         ],
+    },
+    {
+        "title": "DB 에이전트",
+        "summary_prefix": "DB",
+        "fan_out_source": db_agents_fan_out,
     },
     {
         "title": "서버 에이전트 (RHEL 계열)",
