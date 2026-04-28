@@ -514,7 +514,8 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
     cat_row_counts: dict[int, int] = {}
     for cat, _ in collected:
         cat_row_counts[id(cat)] = cat_row_counts.get(id(cat), 0) + 1
-    rows: list[list[str]] = []
+
+    labeled: list[tuple[str, dict]] = []
     for category, info in collected:
         multi = cat_row_counts[id(category)] > 1
         label = (
@@ -522,13 +523,18 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
             if multi
             else category["summary_prefix"]
         )
-        rows.append([
+        labeled.append((label, info))
+
+    rows = [
+        [
             label,
             info["filename"],
             info.get("version") or "-",
             _short_timestamp(info["timestamp_kst"]),
             human_size(info["size"]) if info.get("size") is not None else "-",
-        ])
+        ]
+        for label, info in labeled
+    ]
 
     widths = [
         max(display_width(headers[i]), max((display_width(r[i]) for r in rows), default=0))
@@ -543,8 +549,8 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
     table_block = "```\n" + "\n".join(table_lines) + "\n```"
 
     download_lines = "\n".join(
-        f":arrow_down: <{info['download_url']}|{info['filename']}>"
-        for _, info in collected
+        f":arrow_down: {label}: <{info['download_url']}|{info['filename']}>"
+        for label, info in labeled
     )
 
     title = "\U0001F4CB 전체 다운로드 한눈에 보기"
