@@ -202,16 +202,22 @@ ECR_GALLERY_HEADERS = {
     "referer": "https://gallery.ecr.aws/",
     "user-agent": "Mozilla/5.0",
 }
+# Repos under public.ecr.aws/whatap/ that we don't want in the rollup.
+K8S_EXCLUDE_REPOS = {"gpu-burn"}
+# Tags we never want to surface as "latest version" — these are floating
+# pointers (their digest moves), so the underlying versioned tag is what
+# we actually want to advertise.
+K8S_EXCLUDE_TAGS = {"latest"}
 
 
 def k8s_repos_fan_out(session: requests.Session) -> list[dict]:
     """Fetch every repository under the WhaTap public ECR alias and, for each,
-    return the most recently pushed image tag as one info dict.
+    return the most recently pushed image tag (excluding floating tags like
+    `latest`) as one info dict.
 
-    This is a "fan-out" source: a single call expands into N table rows
-    (currently 9 - one per repo). Repos with no tags still get a row so
-    they are visible at a glance, but with placeholder fields."""
-    # 1) list all repos under whatap alias
+    Fan-out source: a single call expands into N rows (one per repo). Repos
+    in K8S_EXCLUDE_REPOS are skipped entirely. Repos with no eligible tags
+    still get a placeholder row so it's obvious they exist but are empty."""
     r = session.post(
         f"{ECR_GALLERY_API}/describeRepositoryCatalogData",
         headers=ECR_GALLERY_HEADERS,
@@ -219,11 +225,14 @@ def k8s_repos_fan_out(session: requests.Session) -> list[dict]:
         timeout=30,
     )
     r.raise_for_status()
-    repos = [x["repositoryName"] for x in r.json().get("repositories", [])]
+    repos = [
+        x["repositoryName"]
+        for x in r.json().get("repositories", [])
+        if x["repositoryName"] not in K8S_EXCLUDE_REPOS
+    ]
 
     infos: list[dict] = []
     for repo in repos:
-        # 2) paginate tags and pick the most recently pushed
         all_tags: list[dict] = []
         next_token: Optional[str] = None
         while True:
@@ -248,7 +257,8 @@ def k8s_repos_fan_out(session: requests.Session) -> list[dict]:
                 break
 
         gallery_url = f"https://gallery.ecr.aws/whatap/{repo}"
-        if not all_tags:
+        eligible = [t for t in all_tags if t["imageTag"] not in K8S_EXCLUDE_TAGS]
+        if not eligible:
             infos.append({
                 "label": repo,
                 "filename": "(no tags)",
@@ -259,7 +269,7 @@ def k8s_repos_fan_out(session: requests.Session) -> list[dict]:
             })
             continue
 
-        latest = max(all_tags, key=lambda t: t["imageDetail"]["imagePushedAt"])
+        latest = max(eligible, key=lambda t: t["imageDetail"]["imagePushedAt"])
         tag = latest["imageTag"]
         infos.append({
             "label": repo,
