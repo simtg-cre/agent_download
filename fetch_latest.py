@@ -17,6 +17,7 @@ Optional env:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -132,6 +133,68 @@ def s3_prefix_source(prefix: str, label: str) -> Callable[[requests.Session], di
     return fetch
 
 
+def versioned_filename_source(
+    prefix: str,
+    label: str,
+    pattern: re.Pattern,
+    version_format: str,
+) -> Callable[[requests.Session], dict]:
+    """Picks the file under `prefix` whose name matches `pattern` and has the
+    highest numeric version (tuple of capture groups). `version_format` is a
+    str format applied to the version tuple, e.g. "{0}.{1}-{2}" for RPM
+    `2.9-13` or "{0}.{1}.{2}" for DEB `2.9.13`. Files at this prefix often
+    share a single LastModified, so ordering by timestamp is unreliable —
+    the version number embedded in the filename is the source of truth.
+    """
+    def fetch(session: requests.Session) -> dict:
+        objs = list_s3_objects(prefix, session)
+        candidates: list[tuple[tuple[int, ...], dict]] = []
+        for o in objs:
+            name = o["key"].rsplit("/", 1)[-1]
+            m = pattern.match(name)
+            if m:
+                ver = tuple(int(g) for g in m.groups())
+                candidates.append((ver, o))
+        if not candidates:
+            raise RuntimeError(f"no files matching {pattern.pattern!r} under '{prefix}'")
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        version_tuple, latest = candidates[0]
+        return {
+            "label": label,
+            "filename": latest["key"].rsplit("/", 1)[-1],
+            "download_url": PUBLIC_DOWNLOAD_PREFIX + latest["key"],
+            "timestamp_kst": utc_iso_to_kst_string(latest["last_modified"]),
+            "size": latest["size"],
+            "version": version_format.format(*version_tuple),
+        }
+    return fetch
+
+
+def fixed_filename_source(
+    prefix: str,
+    filename: str,
+    label: str,
+) -> Callable[[requests.Session], dict]:
+    """For prefixes that hold a single canonical filename (e.g. windows/whatap_infra.zip)."""
+    def fetch(session: requests.Session) -> dict:
+        objs = list_s3_objects(prefix, session)
+        target = next(
+            (o for o in objs if o["key"].rsplit("/", 1)[-1] == filename),
+            None,
+        )
+        if target is None:
+            raise RuntimeError(f"'{filename}' not found under '{prefix}'")
+        return {
+            "label": label,
+            "filename": filename,
+            "download_url": PUBLIC_DOWNLOAD_PREFIX + target["key"],
+            "timestamp_kst": utc_iso_to_kst_string(target["last_modified"]),
+            "size": target["size"],
+            "version": None,
+        }
+    return fetch
+
+
 def java_agent_source(session: requests.Session) -> dict:
     """Read maven-metadata-local.xml for the latest version + lastUpdated.
     The download URL is the fixed alias on api.whatap.io."""
@@ -166,6 +229,36 @@ SOURCES: list[Callable[[requests.Session], dict]] = [
     s3_prefix_source("package/latest/", "WhaTap 최신 패키지 (package/latest)"),
     s3_prefix_source("rum-onpremise-allinone/", "RUM 온프레미스 All-in-one"),
     java_agent_source,
+    # Server agents (whatap-infra)
+    versioned_filename_source(
+        "centos/latest/x86_64/",
+        "서버 에이전트 (RHEL/CentOS/Amazon Linux x86_64)",
+        re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.x86_64\.rpm$"),
+        "{0}.{1}-{2}",
+    ),
+    versioned_filename_source(
+        "centos/latest/aarch64/",
+        "서버 에이전트 (RHEL/CentOS/Amazon Linux aarch64)",
+        re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.aarch64\.rpm$"),
+        "{0}.{1}-{2}",
+    ),
+    versioned_filename_source(
+        "debian/unstable/",
+        "서버 에이전트 (Ubuntu/Debian amd64)",
+        re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_amd64\.deb$"),
+        "{0}.{1}.{2}",
+    ),
+    versioned_filename_source(
+        "debian/unstable/",
+        "서버 에이전트 (Ubuntu/Debian arm64)",
+        re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_arm64\.deb$"),
+        "{0}.{1}.{2}",
+    ),
+    fixed_filename_source(
+        "windows/",
+        "whatap_infra.zip",
+        "서버 에이전트 (Windows Server)",
+    ),
 ]
 
 
