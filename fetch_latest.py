@@ -328,7 +328,7 @@ def db_agents_fan_out(session: requests.Session) -> list[dict]:
         )
         infos.append({
             "label": label,
-            "filename": "whatap.agent.database.tar.gz",
+            "filename": f"whatap.agent.database.{label}.tar.gz",
             "download_url": download_url,
             "timestamp_kst": timestamp_kst,
             "size": None,
