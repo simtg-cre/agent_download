@@ -15,11 +15,18 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
+
+# Spacing between consecutive Slack POSTs. Incoming Webhooks are throttled
+# to roughly 1 msg/sec per hook; without a small gap, the second message
+# can come back 429 and silently never appear in the channel.
+SLACK_POST_GAP_SEC = 1.2
 
 # Path-style regional endpoint. The CDN-fronted host (repo.whatap.io)
 # silently ignores `prefix` / `max-keys`, so we go straight to S3.
@@ -78,6 +85,15 @@ def to_kst_string(iso_utc: str) -> str:
     return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
+def display_width(s: str) -> int:
+    """Width in monospace cells. CJK glyphs count as 2."""
+    return sum(2 if unicodedata.east_asian_width(c) in ("F", "W") else 1 for c in s)
+
+
+def pad_right(s: str, target_width: int) -> str:
+    return s + " " * max(0, target_width - display_width(s))
+
+
 def human_size(num_bytes: int) -> str:
     size = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -95,6 +111,15 @@ def build_payload(prefix: str, file_info: dict) -> dict:
     size_str = human_size(file_info["size"])
     label = PREFIX_LABELS.get(prefix, prefix.rstrip("/"))
 
+    rows = [
+        ("파일명", filename),
+        ("Timestamp", timestamp_kst),
+        ("Size", size_str),
+    ]
+    label_width = max(display_width(k) for k, _ in rows)
+    table_lines = [f"{pad_right(k, label_width)} | {v}" for k, v in rows]
+    table_block = "```\n" + "\n".join(table_lines) + "\n```"
+
     return {
         "text": f"{label}: {filename}",
         "blocks": [
@@ -104,11 +129,12 @@ def build_payload(prefix: str, file_info: dict) -> dict:
             },
             {
                 "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*파일명*\n<{download_url}|{filename}>"},
-                    {"type": "mrkdwn", "text": f"*Timestamp (KST)*\n`{timestamp_kst}`"},
-                    {"type": "mrkdwn", "text": f"*Size*\n{size_str}"},
-                    {"type": "mrkdwn", "text": f"*URL*\n{download_url}"},
+                "text": {"type": "mrkdwn", "text": table_block},
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f":arrow_down: <{download_url}|{filename}>"},
                 ],
             },
         ],
@@ -175,7 +201,12 @@ def main() -> int:
         return 1
 
     session = requests.Session()
-    failures = [p for p in prefixes if not process_prefix(p, session, webhook, dry_run)]
+    failures: list[str] = []
+    for i, prefix in enumerate(prefixes):
+        if i > 0 and not dry_run:
+            time.sleep(SLACK_POST_GAP_SEC)
+        if not process_prefix(prefix, session, webhook, dry_run):
+            failures.append(prefix)
     if failures:
         print(f"\nFAILED prefixes: {failures}", file=sys.stderr)
         return 1
