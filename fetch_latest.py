@@ -195,70 +195,86 @@ def fixed_filename_source(
     return fetch
 
 
-def java_agent_source(session: requests.Session) -> dict:
+def make_java_agent_source(label: str) -> Callable[[requests.Session], dict]:
     """Read maven-metadata-local.xml for the latest version + lastUpdated.
     The download URL is the fixed alias on api.whatap.io."""
-    metadata_url = (
-        PUBLIC_DOWNLOAD_PREFIX
-        + "maven/io/whatap/whatap.agent/maven-metadata-local.xml"
-    )
-    download_url = "https://api.whatap.io/agent/whatap.agent.java.tar.gz"
+    def fetch(session: requests.Session) -> dict:
+        metadata_url = (
+            PUBLIC_DOWNLOAD_PREFIX
+            + "maven/io/whatap/whatap.agent/maven-metadata-local.xml"
+        )
+        download_url = "https://api.whatap.io/agent/whatap.agent.java.tar.gz"
 
-    resp = session.get(metadata_url, timeout=30)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
-    versioning = root.find("versioning")
-    if versioning is None:
-        raise RuntimeError(f"<versioning> missing in {metadata_url}")
-    release = versioning.findtext("release", default="").strip()
-    last_updated = versioning.findtext("lastUpdated", default="").strip()
-    if not release:
-        raise RuntimeError(f"<release> missing in {metadata_url}")
+        resp = session.get(metadata_url, timeout=30)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        versioning = root.find("versioning")
+        if versioning is None:
+            raise RuntimeError(f"<versioning> missing in {metadata_url}")
+        release = versioning.findtext("release", default="").strip()
+        last_updated = versioning.findtext("lastUpdated", default="").strip()
+        if not release:
+            raise RuntimeError(f"<release> missing in {metadata_url}")
 
-    return {
-        "label": "Java 에이전트 (whatap.agent)",
-        "filename": "whatap.agent.java.tar.gz",
-        "download_url": download_url,
-        "timestamp_kst": maven_lastupdated_to_kst_string(last_updated) if last_updated else "(unknown)",
-        "size": None,
-        "version": release,
-    }
+        return {
+            "label": label,
+            "filename": "whatap.agent.java.tar.gz",
+            "download_url": download_url,
+            "timestamp_kst": maven_lastupdated_to_kst_string(last_updated) if last_updated else "(unknown)",
+            "size": None,
+            "version": release,
+        }
+    return fetch
 
 
-SOURCES: list[Callable[[requests.Session], dict]] = [
-    s3_prefix_source("package/latest/", "WhaTap 최신 패키지 (package/latest)"),
-    s3_prefix_source("rum-onpremise-allinone/", "RUM 온프레미스 All-in-one"),
-    java_agent_source,
-    # Server agents (whatap-infra)
-    versioned_filename_source(
-        "centos/latest/x86_64/",
-        "서버 에이전트 (RHEL/CentOS/Amazon Linux x86_64)",
-        re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.x86_64\.rpm$"),
-        "{0}.{1}-{2}",
-    ),
-    versioned_filename_source(
-        "centos/latest/aarch64/",
-        "서버 에이전트 (RHEL/CentOS/Amazon Linux aarch64)",
-        re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.aarch64\.rpm$"),
-        "{0}.{1}-{2}",
-    ),
-    versioned_filename_source(
-        "debian/unstable/",
-        "서버 에이전트 (Ubuntu/Debian amd64)",
-        re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_amd64\.deb$"),
-        "{0}.{1}.{2}",
-    ),
-    versioned_filename_source(
-        "debian/unstable/",
-        "서버 에이전트 (Ubuntu/Debian arm64)",
-        re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_arm64\.deb$"),
-        "{0}.{1}.{2}",
-    ),
-    fixed_filename_source(
-        "windows/",
-        "whatap_infra.zip",
-        "서버 에이전트 (Windows Server)",
-    ),
+CATEGORIES: list[dict] = [
+    {
+        "title": "일반 패키지",
+        "sources": [
+            s3_prefix_source("package/latest/", "package/latest"),
+            s3_prefix_source("rum-onpremise-allinone/", "RUM 올인원"),
+            make_java_agent_source("Java 에이전트"),
+        ],
+    },
+    {
+        "title": "서버 에이전트 (Linux)",
+        "sources": [
+            versioned_filename_source(
+                "centos/latest/x86_64/",
+                "RHEL/CentOS x86_64",
+                re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.x86_64\.rpm$"),
+                "{0}.{1}-{2}",
+            ),
+            versioned_filename_source(
+                "centos/latest/aarch64/",
+                "RHEL/CentOS aarch64",
+                re.compile(r"^whatap-infra-(\d+)\.(\d+)-(\d+)\.aarch64\.rpm$"),
+                "{0}.{1}-{2}",
+            ),
+            versioned_filename_source(
+                "debian/unstable/",
+                "Ubuntu/Debian amd64",
+                re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_amd64\.deb$"),
+                "{0}.{1}.{2}",
+            ),
+            versioned_filename_source(
+                "debian/unstable/",
+                "Ubuntu/Debian arm64",
+                re.compile(r"^whatap-infra_(\d+)\.(\d+)\.(\d+)_arm64\.deb$"),
+                "{0}.{1}.{2}",
+            ),
+        ],
+    },
+    {
+        "title": "서버 에이전트 (Windows)",
+        "sources": [
+            fixed_filename_source(
+                "windows/",
+                "whatap_infra.zip",
+                "Windows",
+            ),
+        ],
+    },
 ]
 
 
@@ -266,29 +282,47 @@ SOURCES: list[Callable[[requests.Session], dict]] = [
 # slack
 # ---------------------------------------------------------------------------
 
-def build_payload(info: dict) -> dict:
-    rows: list[tuple[str, str]] = [("파일명", info["filename"])]
-    if info.get("version"):
-        rows.append(("Version", info["version"]))
-    rows.append(("Timestamp", info["timestamp_kst"]))
-    if info.get("size") is not None:
-        rows.append(("Size", human_size(info["size"])))
+def _short_timestamp(ts_kst: str) -> str:
+    """'2026-04-27 16:08:23 KST' -> '2026-04-27 16:08:23' (drop the KST suffix)."""
+    return ts_kst.removesuffix(" KST")
 
-    label_width = max(display_width(k) for k, _ in rows)
-    table_lines = [f"{pad_right(k, label_width)} | {v}" for k, v in rows]
+
+def build_category_payload(category_title: str, infos: list[dict]) -> dict:
+    headers = ["구분", "파일명", "Version", "Timestamp", "Size"]
+    rows = [
+        [
+            info["label"],
+            info["filename"],
+            info.get("version") or "-",
+            _short_timestamp(info["timestamp_kst"]),
+            human_size(info["size"]) if info.get("size") is not None else "-",
+        ]
+        for info in infos
+    ]
+
+    widths = [
+        max(display_width(headers[i]), max((display_width(r[i]) for r in rows), default=0))
+        for i in range(len(headers))
+    ]
+
+    def fmt_row(cells: list[str]) -> str:
+        return "  ".join(pad_right(c, widths[i]) for i, c in enumerate(cells))
+
+    sep = ["-" * widths[i] for i in range(len(headers))]
+    table_lines = [fmt_row(headers), fmt_row(sep)] + [fmt_row(r) for r in rows]
     table_block = "```\n" + "\n".join(table_lines) + "\n```"
 
+    download_lines = "\n".join(
+        f":arrow_down: <{info['download_url']}|{info['filename']}>"
+        for info in infos
+    )
+
     return {
-        "text": f"{info['label']}: {info['filename']}",
+        "text": f"{category_title} ({len(infos)})",
         "blocks": [
-            {"type": "header", "text": {"type": "plain_text", "text": info["label"]}},
+            {"type": "header", "text": {"type": "plain_text", "text": category_title}},
             {"type": "section", "text": {"type": "mrkdwn", "text": table_block}},
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f":arrow_down: <{info['download_url']}|{info['filename']}>"},
-                ],
-            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": download_lines}},
         ],
     }
 
@@ -325,32 +359,42 @@ def post_to_slack(webhook_url: str, payload: dict) -> None:
 # main
 # ---------------------------------------------------------------------------
 
-def process_source(
-    source: Callable[[requests.Session], dict],
+def process_category(
+    category: dict,
     session: requests.Session,
     webhook: Optional[str],
     dry_run: bool,
 ) -> bool:
-    try:
-        info = source(session)
-    except Exception as e:
-        print(f"ERROR fetching source: {e}", file=sys.stderr)
+    """Fetch every source in the category, build one combined Slack message
+    with a multi-row table, and post it. Returns True if no errors."""
+    title = category["title"]
+    print(f"\n=== {title} ===")
+    infos: list[dict] = []
+    fetch_failures = 0
+    for source in category["sources"]:
+        try:
+            info = source(session)
+        except Exception as e:
+            fetch_failures += 1
+            print(f"  ERROR fetching source: {e}", file=sys.stderr)
+            continue
+        infos.append(info)
+        print(
+            f"  ok: [{info['label']}] {info['filename']}"
+            + (f"  v{info['version']}" if info.get("version") else "")
+            + f"  {_short_timestamp(info['timestamp_kst'])}"
+            + (f"  {human_size(info['size'])}" if info.get("size") is not None else "")
+        )
+
+    if not infos:
+        print("  no rows fetched; skipping Slack post", file=sys.stderr)
         return False
 
-    print(f"\n=== {info['label']} ===")
-    print(f"  filename:  {info['filename']}")
-    if info.get("version"):
-        print(f"  version:   {info['version']}")
-    print(f"  timestamp: {info['timestamp_kst']}")
-    if info.get("size") is not None:
-        print(f"  size:      {human_size(info['size'])}")
-    print(f"  url:       {info['download_url']}")
-
-    payload = build_payload(info)
+    payload = build_category_payload(title, infos)
 
     if dry_run:
         print("  DRY_RUN=1, skipping Slack post")
-        return True
+        return fetch_failures == 0
     if not webhook:
         print("  ERROR: SLACK_WEBHOOK_URL is not set", file=sys.stderr)
         return False
@@ -360,7 +404,7 @@ def process_source(
         print(f"  ERROR posting to Slack: {e}", file=sys.stderr)
         return False
     print("  posted to Slack")
-    return True
+    return fetch_failures == 0
 
 
 def main() -> int:
@@ -393,10 +437,10 @@ def main() -> int:
             print(f"  ERROR posting title to Slack: {e}", file=sys.stderr)
             failures += 1
 
-    for source in SOURCES:
+    for category in CATEGORIES:
         if not dry_run:
             time.sleep(SLACK_POST_GAP_SEC)
-        if not process_source(source, session, webhook, dry_run):
+        if not process_category(category, session, webhook, dry_run):
             failures += 1
 
     if failures:
