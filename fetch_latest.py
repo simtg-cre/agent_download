@@ -553,6 +553,13 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
         for label, info in labeled
     )
 
+    # Raw URL list inside a code block — Slack renders a one-click "Copy"
+    # button on code blocks, making it easy to grab every URL at once.
+    copy_block = "```\n" + "\n".join(
+        f"{label}: {info['download_url']}"
+        for label, info in labeled
+    ) + "\n```"
+
     title = "\U0001F4CB 전체 다운로드 한눈에 보기"
     return {
         "text": title,
@@ -561,6 +568,8 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
             {"type": "header", "text": {"type": "plain_text", "text": title}},
             {"type": "section", "text": {"type": "mrkdwn", "text": table_block}},
             {"type": "section", "text": {"type": "mrkdwn", "text": download_lines}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "*복사용 URL 목록*"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": copy_block}},
         ],
     }
 
