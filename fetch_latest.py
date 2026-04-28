@@ -534,6 +534,46 @@ def build_category_payload(category_title: str, infos: list[dict]) -> dict:
     }
 
 
+# Slack rejects sections whose text exceeds 3000 chars with `invalid_blocks`.
+# Leave a small headroom so we don't trip the limit on edge-case rows.
+SLACK_SECTION_CHAR_LIMIT = 2900
+
+
+def _pack_section_lines(
+    lines: list[str],
+    wrap_code: bool,
+    repeat_lines: list[str] | None = None,
+) -> list[dict]:
+    """Pack `lines` into Slack section blocks within Slack's per-section
+    text limit. If `wrap_code` is True, each chunk is fenced with ```. If
+    `repeat_lines` is given (e.g. table header + separator), those lines are
+    repeated at the start of every chunk so split tables still have a header."""
+    repeat_lines = repeat_lines or []
+    fence_overhead = len("```\n\n```") if wrap_code else 0
+    repeat_overhead = sum(len(l) + 1 for l in repeat_lines)
+    base_overhead = fence_overhead + repeat_overhead
+
+    chunks: list[list[str]] = [list(repeat_lines)]
+    cur_len = base_overhead
+    for line in lines:
+        ln = len(line) + 1
+        if cur_len + ln > SLACK_SECTION_CHAR_LIMIT and len(chunks[-1]) > len(repeat_lines):
+            chunks.append(list(repeat_lines))
+            cur_len = base_overhead
+        chunks[-1].append(line)
+        cur_len += ln
+
+    sections: list[dict] = []
+    for chunk in chunks:
+        if len(chunk) <= len(repeat_lines):
+            continue
+        text = "\n".join(chunk)
+        if wrap_code:
+            text = "```\n" + text + "\n```"
+        sections.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
+    return sections
+
+
 def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
     """Build a final consolidated table covering every category at once.
 
@@ -577,20 +617,20 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
         return "  ".join(pad_right(c, widths[i]) for i, c in enumerate(cells))
 
     sep = ["-" * widths[i] for i in range(len(headers))]
-    table_lines = [fmt_row(headers), fmt_row(sep)] + [fmt_row(r) for r in rows]
-    table_block = "```\n" + "\n".join(table_lines) + "\n```"
+    table_header = [fmt_row(headers), fmt_row(sep)]
+    table_data = [fmt_row(r) for r in rows]
+    table_sections = _pack_section_lines(table_data, wrap_code=True, repeat_lines=table_header)
 
-    download_lines = "\n".join(
+    download_lines_list = [
         f":arrow_down: {label}: <{info['download_url']}|{info['filename']}>"
         for label, info in labeled
-    )
+    ]
+    download_sections = _pack_section_lines(download_lines_list, wrap_code=False)
 
     # Raw URL list inside a code block — Slack renders a one-click "Copy"
     # button on code blocks, making it easy to grab every URL at once.
-    copy_block = "```\n" + "\n".join(
-        f"{label}: {info['download_url']}"
-        for label, info in labeled
-    ) + "\n```"
+    copy_lines = [f"{label}: {info['download_url']}" for label, info in labeled]
+    copy_sections = _pack_section_lines(copy_lines, wrap_code=True)
 
     title = "\U0001F4CB 전체 다운로드 한눈에 보기"
     return {
@@ -598,10 +638,10 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
         "blocks": [
             {"type": "divider"},
             {"type": "header", "text": {"type": "plain_text", "text": title}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": table_block}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": download_lines}},
+            *table_sections,
+            *download_sections,
             {"type": "section", "text": {"type": "mrkdwn", "text": "*복사용 URL 목록*"}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": copy_block}},
+            *copy_sections,
         ],
     }
 
