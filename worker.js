@@ -1,10 +1,10 @@
-// Slack /새로고침 + /매뉴얼 → 분기 처리
-// /새로고침: GitHub Actions repository_dispatch 트리거
+// Slack /패키지 + /매뉴얼 → 분기 처리
+// /패키지: GitHub Actions repository_dispatch 트리거 (패키지 정보 갱신)
 // /매뉴얼 [키워드 ...]: docs.whatap.io/reference 페이지에서 카테고리 LIKE 검색 (공백 구분 다중 키워드 OR 매칭)
 
 const GITHUB_REPO = 'simtg-cre/agent_download';
 const DISPATCH_EVENT_TYPE = 'slack-refresh';
-const REFRESH_COMMAND = '/새로고침';
+const REFRESH_COMMAND = '/패키지';
 const MANUAL_COMMAND = '/매뉴얼';
 const DOCS_URL = 'https://docs.whatap.io/reference';
 const MAX_SECTION_TEXT = 2900;
@@ -68,7 +68,7 @@ export default {
   },
 };
 
-// ─────────────────────────── /새로고침 ───────────────────────────
+// ─────────────────────────── /패키지 ───────────────────────────
 
 async function triggerGitHubWorkflow(env, userName) {
   const resp = await fetch(
