@@ -540,6 +540,59 @@ def build_category_payload(category: dict, infos: list[dict]) -> dict:
     }
 
 
+def build_copy_payload(collected: list[tuple[dict, dict]]) -> dict:
+    """Final message of raw 'label: url' lines inside a code block. Slack
+    renders a one-click Copy button on code blocks, so users can grab every
+    URL at once. Labels match the per-category download line so the two
+    views line up."""
+    cat_row_counts: dict[int, int] = {}
+    for cat, _ in collected:
+        cat_row_counts[id(cat)] = cat_row_counts.get(id(cat), 0) + 1
+
+    lines: list[str] = []
+    for category, info in collected:
+        multi = cat_row_counts[id(category)] > 1
+        label = (
+            f"{category['summary_prefix']} {info['label']}"
+            if multi
+            else category["summary_prefix"]
+        )
+        lines.append(f"{label}: {info['download_url']}")
+
+    # Defensive chunking — a single fenced section must stay under Slack's
+    # 3000-char text limit. Accounts for the ```/``` fence overhead.
+    section_limit = 2900
+    fence_overhead = len("```\n\n```")
+    sections: list[dict] = []
+    buffer: list[str] = []
+    buffer_len = 0
+    for line in lines:
+        ln = len(line) + 1
+        if buffer and buffer_len + fence_overhead + ln > section_limit:
+            sections.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "```\n" + "\n".join(buffer) + "\n```"},
+            })
+            buffer = []
+            buffer_len = 0
+        buffer.append(line)
+        buffer_len += ln
+    if buffer:
+        sections.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "```\n" + "\n".join(buffer) + "\n```"},
+        })
+
+    return {
+        "text": "복사용 URL 목록",
+        "blocks": [
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": "*복사용 URL 목록*"}},
+            *sections,
+        ],
+    }
+
+
 def build_title_payload(keyword: str = "") -> dict:
     """Header-only message used as a daily title above the package list."""
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
@@ -729,6 +782,21 @@ def main() -> int:
             failures += 1
         for info in infos:
             collected.append((category, info))
+
+    if collected:
+        if not dry_run:
+            time.sleep(SLACK_POST_GAP_SEC)
+        copy_payload = build_copy_payload(collected)
+        print(f"\n=== copy URLs ({len(collected)} rows) ===")
+        if dry_run:
+            print("  DRY_RUN=1, skipping Slack post")
+        elif webhook:
+            try:
+                post_to_slack(webhook, copy_payload)
+                print("  posted to Slack")
+            except Exception as e:
+                print(f"  ERROR posting copy URLs to Slack: {e}", file=sys.stderr)
+                failures += 1
 
     if failures:
         print(f"\n{failures} message(s) failed", file=sys.stderr)
