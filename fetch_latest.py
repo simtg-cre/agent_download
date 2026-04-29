@@ -574,7 +574,7 @@ def _pack_section_lines(
     return sections
 
 
-def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
+def build_summary_payload(collected: list[tuple[dict, dict]], keyword: str = "") -> dict:
     """Build a final consolidated table covering every category at once.
 
     `collected` is a list of (category, info) tuples in the order they were
@@ -632,7 +632,11 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
     copy_lines = [f"{label}: {info['download_url']}" for label, info in labeled]
     copy_sections = _pack_section_lines(copy_lines, wrap_code=True)
 
-    title = "\U0001F4CB 전체 다운로드 한눈에 보기"
+    title = (
+        f"\U0001F4CB 패키지 검색 결과 한눈에 보기 — {keyword}"
+        if keyword
+        else "\U0001F4CB 전체 다운로드 한눈에 보기"
+    )
     return {
         "text": title,
         "blocks": [
@@ -646,15 +650,50 @@ def build_summary_payload(collected: list[tuple[dict, dict]]) -> dict:
     }
 
 
-def build_title_payload() -> dict:
+def build_title_payload(keyword: str = "") -> dict:
     """Header-only message used as a daily title above the package list."""
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
-    title = f"\U0001F4E6 WhaTap 일일 패키지 알림 - {now_kst}"
+    if keyword:
+        title = f"\U0001F4E6 WhaTap 패키지 검색: {keyword} - {now_kst}"
+    else:
+        title = f"\U0001F4E6 WhaTap 일일 패키지 알림 - {now_kst}"
     return {
         "text": title,
         "blocks": [
             {"type": "header", "text": {"type": "plain_text", "text": title}},
             {"type": "divider"},
+        ],
+    }
+
+
+def filter_categories_by_keyword(categories: list[dict], keyword: str) -> list[dict]:
+    """OR-match categories by keyword. Tokens are space-separated; a category
+    matches if any token is a case-insensitive substring of its title or
+    summary_prefix. Empty keyword returns all categories."""
+    if not keyword:
+        return categories
+    tokens = [t for t in keyword.lower().split() if t]
+    if not tokens:
+        return categories
+    return [
+        c for c in categories
+        if any(
+            t in c["title"].lower() or t in c["summary_prefix"].lower()
+            for t in tokens
+        )
+    ]
+
+
+def build_no_match_payload(keyword: str, categories: list[dict]) -> dict:
+    available = ", ".join(c["title"] for c in categories)
+    text = (
+        f":mag: `{keyword}` 와 일치하는 패키지 카테고리가 없습니다.\n"
+        f"*사용 가능한 카테고리:* {available}"
+    )
+    return {
+        "text": f"`{keyword}` 와 일치하는 패키지 카테고리가 없습니다.",
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
         ],
     }
 
@@ -756,14 +795,30 @@ def main() -> int:
 
     dry_run = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
     webhook = os.environ.get("SLACK_WEBHOOK_URL")
+    keyword = os.environ.get("PACKAGE_KEYWORD", "").strip()
     if not dry_run and not webhook:
         print("ERROR: SLACK_WEBHOOK_URL is not set", file=sys.stderr)
         return 1
 
+    categories_to_process = filter_categories_by_keyword(CATEGORIES, keyword)
+    if keyword and not categories_to_process:
+        print(f"=== no match for keyword: {keyword!r} ===")
+        if dry_run:
+            print("  DRY_RUN=1, skipping Slack post")
+            return 0
+        if webhook:
+            try:
+                post_to_slack(webhook, build_no_match_payload(keyword, CATEGORIES))
+                print("  posted to Slack")
+            except Exception as e:
+                print(f"  ERROR posting no-match to Slack: {e}", file=sys.stderr)
+                return 1
+        return 0
+
     session = requests.Session()
     failures = 0
 
-    title_payload = build_title_payload()
+    title_payload = build_title_payload(keyword)
     print(f"=== title ===\n  {title_payload['text']}")
     if dry_run:
         print("  DRY_RUN=1, skipping Slack post")
@@ -776,7 +831,7 @@ def main() -> int:
             failures += 1
 
     collected: list[tuple[dict, dict]] = []
-    for category in CATEGORIES:
+    for category in categories_to_process:
         if not dry_run:
             time.sleep(SLACK_POST_GAP_SEC)
         success, infos = process_category(category, session, webhook, dry_run)
@@ -789,7 +844,7 @@ def main() -> int:
     if collected:
         if not dry_run:
             time.sleep(SLACK_POST_GAP_SEC)
-        summary_payload = build_summary_payload(collected)
+        summary_payload = build_summary_payload(collected, keyword)
         print(f"\n=== summary ({len(collected)} rows) ===")
         if dry_run:
             print("  DRY_RUN=1, skipping Slack post")

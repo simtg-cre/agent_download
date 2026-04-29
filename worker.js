@@ -44,10 +44,12 @@ export default {
     const responseUrl = params.get('response_url');
 
     if (command === REFRESH_COMMAND) {
-      ctx.waitUntil(triggerGitHubWorkflow(env, userName));
+      ctx.waitUntil(triggerGitHubWorkflow(env, userName, text));
       return jsonResponse({
         response_type: 'in_channel',
-        text: `:arrows_counterclockwise: \`${userName}\` 님이 패키지 정보 새로고침을 요청했습니다. 잠시 후 결과가 게시됩니다.`,
+        text: text
+          ? `:arrows_counterclockwise: \`${userName}\` 님이 패키지 \`${text}\` 검색을 요청했습니다. 잠시 후 결과가 게시됩니다.`
+          : `:arrows_counterclockwise: \`${userName}\` 님이 전체 패키지 정보 새로고침을 요청했습니다. 잠시 후 결과가 게시됩니다.`,
       });
     }
 
@@ -70,7 +72,7 @@ export default {
 
 // ─────────────────────────── /패키지 ───────────────────────────
 
-async function triggerGitHubWorkflow(env, userName) {
+async function triggerGitHubWorkflow(env, userName, keyword) {
   const resp = await fetch(
     `https://api.github.com/repos/${GITHUB_REPO}/dispatches`,
     {
@@ -84,7 +86,7 @@ async function triggerGitHubWorkflow(env, userName) {
       },
       body: JSON.stringify({
         event_type: DISPATCH_EVENT_TYPE,
-        client_payload: { triggered_by: userName },
+        client_payload: { triggered_by: userName, keyword: keyword || '' },
       }),
     }
   );

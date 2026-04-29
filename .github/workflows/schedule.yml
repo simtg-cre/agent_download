@@ -25,3 +25,4 @@ jobs:
       - run: python fetch_latest.py
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PACKAGE_KEYWORD: ${{ github.event.client_payload.keyword }}
