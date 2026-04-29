@@ -286,6 +286,7 @@ DB_AGENT_TYPES = [
     ("MySQL", "mysql"),
     ("Oracle", "oracle"),
     ("PostgreSQL", "postgresql"),
+    ("MSSQL", "mssql"),
 ]
 
 
