@@ -492,13 +492,16 @@ def _short_timestamp(ts_kst: str) -> str:
     return ts_kst.removesuffix(" KST")
 
 
-def build_category_payload(category_title: str, infos: list[dict]) -> dict:
+def build_category_payload(category: dict, infos: list[dict]) -> dict:
     # Drop the 구분 column when there is only one row (it'd just repeat
     # the category header).
-    show_label_col = len(infos) > 1
-    headers = (["구분"] if show_label_col else []) + ["파일명", "Version", "Timestamp", "Size"]
+    title = category["title"]
+    summary_prefix = category["summary_prefix"]
+    multi = len(infos) > 1
+
+    headers = (["구분"] if multi else []) + ["파일명", "Version", "Timestamp", "Size"]
     rows = [
-        ([info["label"]] if show_label_col else []) + [
+        ([info["label"]] if multi else []) + [
             info["filename"],
             info.get("version") or "-",
             _short_timestamp(info["timestamp_kst"]),
@@ -519,133 +522,20 @@ def build_category_payload(category_title: str, infos: list[dict]) -> dict:
     table_lines = [fmt_row(headers), fmt_row(sep)] + [fmt_row(r) for r in rows]
     table_block = "```\n" + "\n".join(table_lines) + "\n```"
 
+    def label_for(info: dict) -> str:
+        return f"{summary_prefix} {info['label']}" if multi else summary_prefix
+
     download_lines = "\n".join(
-        f":arrow_down: <{info['download_url']}|{info['filename']}>"
+        f":arrow_down: {label_for(info)}: <{info['download_url']}|{info['filename']}>"
         for info in infos
     )
 
     return {
-        "text": f"{category_title} ({len(infos)})",
+        "text": f"{title} ({len(infos)})",
         "blocks": [
-            {"type": "header", "text": {"type": "plain_text", "text": category_title}},
+            {"type": "header", "text": {"type": "plain_text", "text": title}},
             {"type": "section", "text": {"type": "mrkdwn", "text": table_block}},
             {"type": "section", "text": {"type": "mrkdwn", "text": download_lines}},
-        ],
-    }
-
-
-# Slack rejects sections whose text exceeds 3000 chars with `invalid_blocks`.
-# Leave a small headroom so we don't trip the limit on edge-case rows.
-SLACK_SECTION_CHAR_LIMIT = 2900
-
-
-def _pack_section_lines(
-    lines: list[str],
-    wrap_code: bool,
-    repeat_lines: list[str] | None = None,
-) -> list[dict]:
-    """Pack `lines` into Slack section blocks within Slack's per-section
-    text limit. If `wrap_code` is True, each chunk is fenced with ```. If
-    `repeat_lines` is given (e.g. table header + separator), those lines are
-    repeated at the start of every chunk so split tables still have a header."""
-    repeat_lines = repeat_lines or []
-    fence_overhead = len("```\n\n```") if wrap_code else 0
-    repeat_overhead = sum(len(l) + 1 for l in repeat_lines)
-    base_overhead = fence_overhead + repeat_overhead
-
-    chunks: list[list[str]] = [list(repeat_lines)]
-    cur_len = base_overhead
-    for line in lines:
-        ln = len(line) + 1
-        if cur_len + ln > SLACK_SECTION_CHAR_LIMIT and len(chunks[-1]) > len(repeat_lines):
-            chunks.append(list(repeat_lines))
-            cur_len = base_overhead
-        chunks[-1].append(line)
-        cur_len += ln
-
-    sections: list[dict] = []
-    for chunk in chunks:
-        if len(chunk) <= len(repeat_lines):
-            continue
-        text = "\n".join(chunk)
-        if wrap_code:
-            text = "```\n" + text + "\n```"
-        sections.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
-    return sections
-
-
-def build_summary_payload(collected: list[tuple[dict, dict]], keyword: str = "") -> dict:
-    """Build a final consolidated table covering every category at once.
-
-    `collected` is a list of (category, info) tuples in the order they were
-    processed. The 구분 column combines each category's summary_prefix with
-    the per-source label when the category has multiple sources, and is just
-    the prefix when single-source."""
-    headers = ["구분", "파일명", "Version", "Timestamp", "Size"]
-    # Count rows per category (use id() since categories aren't hashable as dicts).
-    cat_row_counts: dict[int, int] = {}
-    for cat, _ in collected:
-        cat_row_counts[id(cat)] = cat_row_counts.get(id(cat), 0) + 1
-
-    labeled: list[tuple[str, dict]] = []
-    for category, info in collected:
-        multi = cat_row_counts[id(category)] > 1
-        label = (
-            f"{category['summary_prefix']} {info['label']}"
-            if multi
-            else category["summary_prefix"]
-        )
-        labeled.append((label, info))
-
-    rows = [
-        [
-            label,
-            info["filename"],
-            info.get("version") or "-",
-            _short_timestamp(info["timestamp_kst"]),
-            human_size(info["size"]) if info.get("size") is not None else "-",
-        ]
-        for label, info in labeled
-    ]
-
-    widths = [
-        max(display_width(headers[i]), max((display_width(r[i]) for r in rows), default=0))
-        for i in range(len(headers))
-    ]
-
-    def fmt_row(cells: list[str]) -> str:
-        return "  ".join(pad_right(c, widths[i]) for i, c in enumerate(cells))
-
-    sep = ["-" * widths[i] for i in range(len(headers))]
-    table_header = [fmt_row(headers), fmt_row(sep)]
-    table_data = [fmt_row(r) for r in rows]
-    table_sections = _pack_section_lines(table_data, wrap_code=True, repeat_lines=table_header)
-
-    download_lines_list = [
-        f":arrow_down: {label}: <{info['download_url']}|{info['filename']}>"
-        for label, info in labeled
-    ]
-    download_sections = _pack_section_lines(download_lines_list, wrap_code=False)
-
-    # Raw URL list inside a code block — Slack renders a one-click "Copy"
-    # button on code blocks, making it easy to grab every URL at once.
-    copy_lines = [f"{label}: {info['download_url']}" for label, info in labeled]
-    copy_sections = _pack_section_lines(copy_lines, wrap_code=True)
-
-    title = (
-        f"\U0001F4CB 패키지 검색 결과 한눈에 보기 — {keyword}"
-        if keyword
-        else "\U0001F4CB 전체 다운로드 한눈에 보기"
-    )
-    return {
-        "text": title,
-        "blocks": [
-            {"type": "divider"},
-            {"type": "header", "text": {"type": "plain_text", "text": title}},
-            *table_sections,
-            *download_sections,
-            {"type": "section", "text": {"type": "mrkdwn", "text": "*복사용 URL 목록*"}},
-            *copy_sections,
         ],
     }
 
@@ -654,7 +544,7 @@ def build_title_payload(keyword: str = "") -> dict:
     """Header-only message used as a daily title above the package list."""
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S KST")
     if keyword:
-        title = f"\U0001F4E6 WhaTap 패키지 검색: {keyword} - {now_kst}"
+        title = f"\U0001F4E6 검색키워드 : {keyword} - {now_kst}"
     else:
         title = f"\U0001F4E6 WhaTap 일일 패키지 알림 - {now_kst}"
     return {
@@ -767,7 +657,7 @@ def process_category(
         print("  no rows fetched; skipping Slack post", file=sys.stderr)
         return False, []
 
-    payload = build_category_payload(title, infos)
+    payload = build_category_payload(category, infos)
 
     if dry_run:
         print("  DRY_RUN=1, skipping Slack post")
@@ -839,22 +729,6 @@ def main() -> int:
             failures += 1
         for info in infos:
             collected.append((category, info))
-
-    # Final consolidated summary across every category we successfully fetched.
-    if collected:
-        if not dry_run:
-            time.sleep(SLACK_POST_GAP_SEC)
-        summary_payload = build_summary_payload(collected, keyword)
-        print(f"\n=== summary ({len(collected)} rows) ===")
-        if dry_run:
-            print("  DRY_RUN=1, skipping Slack post")
-        elif webhook:
-            try:
-                post_to_slack(webhook, summary_payload)
-                print("  posted to Slack")
-            except Exception as e:
-                print(f"  ERROR posting summary to Slack: {e}", file=sys.stderr)
-                failures += 1
 
     if failures:
         print(f"\n{failures} message(s) failed", file=sys.stderr)
