@@ -433,6 +433,7 @@ CATEGORIES: list[dict] = [
         "title": "DB 에이전트",
         "summary_prefix": "DB)",
         "fan_out_source": db_agents_fan_out,
+        "known_labels": [label for label, _ in DB_AGENT_TYPES],
     },
     {
         "title": "서버 에이전트 (RHEL 계열)",
@@ -451,6 +452,7 @@ CATEGORIES: list[dict] = [
                 "{0}.{1}-{2}",
             ),
         ],
+        "known_labels": ["x86_64", "aarch64"],
     },
     {
         "title": "서버 에이전트 (Ubuntu 계열)",
@@ -469,6 +471,7 @@ CATEGORIES: list[dict] = [
                 "{0}.{1}.{2}",
             ),
         ],
+        "known_labels": ["amd64", "arm64"],
     },
     {
         "title": "서버 에이전트 (Windows)",
@@ -610,21 +613,47 @@ def build_title_payload(keyword: str = "") -> dict:
     }
 
 
+def _keyword_tokens(keyword: str) -> list[str]:
+    return [t for t in keyword.lower().split() if t]
+
+
+def category_matches_title_or_prefix(category: dict, tokens: list[str]) -> bool:
+    """Whether any token hits the category's title or summary_prefix. When True
+    we surface every info in the category instead of filtering item-by-item."""
+    if not tokens:
+        return True
+    title = category["title"].lower()
+    prefix = category["summary_prefix"].lower()
+    return any(t in title or t in prefix for t in tokens)
+
+
 def filter_categories_by_keyword(categories: list[dict], keyword: str) -> list[dict]:
-    """OR-match categories by keyword. Tokens are space-separated; a category
-    matches if any token is a case-insensitive substring of its title or
-    summary_prefix. Empty keyword returns all categories."""
-    if not keyword:
-        return categories
-    tokens = [t for t in keyword.lower().split() if t]
+    """OR-match categories by keyword. A category passes the pre-filter if any
+    token hits its title, summary_prefix, or one of its known item labels (e.g.
+    DB types or arch suffixes). Empty keyword returns all categories."""
+    tokens = _keyword_tokens(keyword)
     if not tokens:
         return categories
+
+    def matches(c: dict) -> bool:
+        if category_matches_title_or_prefix(c, tokens):
+            return True
+        labels = c.get("known_labels") or []
+        return any(t in label.lower() for label in labels for t in tokens)
+
+    return [c for c in categories if matches(c)]
+
+
+def filter_infos_by_keyword(infos: list[dict], keyword: str) -> list[dict]:
+    """Keep only infos whose `label` matches a keyword token. Used inside a
+    category that was selected via item-label match so the user sees just the
+    items they asked about instead of every sibling."""
+    tokens = _keyword_tokens(keyword)
+    if not tokens:
+        return infos
     return [
-        c for c in categories
-        if any(
-            t in c["title"].lower() or t in c["summary_prefix"].lower()
-            for t in tokens
-        )
+        info for info in infos
+        if any(t in str(info.get("label", "")).lower() for t in tokens)
     ]
 
 
@@ -666,11 +695,16 @@ def process_category(
     session: requests.Session,
     webhook: Optional[str],
     dry_run: bool,
+    keyword: str = "",
 ) -> tuple[bool, list[dict]]:
     """Fetch every source in the category, build one combined Slack message
     with a multi-row table, and post it. Returns (success, infos) — infos
     is the list of successfully fetched source dicts (empty on full failure)
-    so the caller can build a final summary across all categories."""
+    so the caller can build a final summary across all categories.
+
+    When `keyword` is set and the category was selected only via item-label
+    match (not by title/prefix), filter infos down to those whose label
+    matches a token so the user sees just the items they asked about."""
     title = category["title"]
     print(f"\n=== {title} ===")
     infos: list[dict] = []
@@ -710,6 +744,13 @@ def process_category(
     if not infos:
         print("  no rows fetched; skipping Slack post", file=sys.stderr)
         return False, []
+
+    tokens = _keyword_tokens(keyword)
+    if tokens and not category_matches_title_or_prefix(category, tokens):
+        infos = filter_infos_by_keyword(infos, keyword)
+        if not infos:
+            print(f"  no rows match keyword {keyword!r}; skipping Slack post")
+            return True, []
 
     payload = build_category_payload(category, infos)
 
@@ -778,11 +819,21 @@ def main() -> int:
     for category in categories_to_process:
         if not dry_run:
             time.sleep(SLACK_POST_GAP_SEC)
-        success, infos = process_category(category, session, webhook, dry_run)
+        success, infos = process_category(category, session, webhook, dry_run, keyword)
         if not success:
             failures += 1
         for info in infos:
             collected.append((category, info))
+
+    if keyword and not collected:
+        print(f"=== no rows match keyword: {keyword!r} ===")
+        if not dry_run and webhook:
+            try:
+                post_to_slack(webhook, build_no_match_payload(keyword, CATEGORIES))
+                print("  posted to Slack")
+            except Exception as e:
+                print(f"  ERROR posting no-match to Slack: {e}", file=sys.stderr)
+                failures += 1
 
     if collected:
         if not dry_run:
