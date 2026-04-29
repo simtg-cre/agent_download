@@ -1,6 +1,6 @@
 // Slack /패키지 + /매뉴얼 → 분기 처리
 // /패키지: GitHub Actions repository_dispatch 트리거 (패키지 정보 갱신)
-// /매뉴얼 [키워드 ...]: docs.whatap.io/reference 페이지에서 카테고리 LIKE 검색 (공백 구분 다중 키워드 OR 매칭)
+// /매뉴얼 [키워드 ...]: docs.whatap.io/reference 페이지에서 카테고리/항목명 LIKE 검색 (공백 구분 다중 키워드 OR 매칭)
 
 const GITHUB_REPO = 'simtg-cre/agent_download';
 const DISPATCH_EVENT_TYPE = 'slack-refresh';
@@ -109,13 +109,13 @@ async function handleManualCommand(keyword, userName, responseUrl) {
       return;
     }
 
-    const filtered = filterByCategory(rows, keyword);
+    const filtered = filterRows(rows, keyword);
 
     if (filtered.length === 0) {
       const allCategories = rows.map((r) => r.category).join(', ');
       await postToResponseUrl(responseUrl, {
         response_type: 'in_channel',
-        text: `:mag: \`${keyword}\` 와 일치하는 카테고리가 없습니다.\n*사용 가능한 카테고리:* ${allCategories}`,
+        text: `:mag: \`${keyword}\` 와 일치하는 항목이 없습니다.\n*사용 가능한 카테고리:* ${allCategories}`,
       });
       return;
     }
@@ -206,14 +206,26 @@ function stripTags(s) {
   return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ');
 }
 
-function filterByCategory(rows, keyword) {
+function filterRows(rows, keyword) {
   if (!keyword) return rows;
   const tokens = keyword.toLowerCase().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return rows;
-  return rows.filter((r) => {
+
+  const result = [];
+  for (const r of rows) {
     const cat = r.category.toLowerCase();
-    return tokens.some((t) => cat.includes(t));
-  });
+    if (tokens.some((t) => cat.includes(t))) {
+      result.push(r);
+      continue;
+    }
+    const matchedItems = r.items.filter((i) =>
+      tokens.some((t) => i.name.toLowerCase().includes(t))
+    );
+    if (matchedItems.length > 0) {
+      result.push({ category: r.category, items: matchedItems });
+    }
+  }
+  return result;
 }
 
 function buildCategoryBlocks(row) {
