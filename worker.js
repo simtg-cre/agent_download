@@ -132,6 +132,13 @@ async function handleManualCommand(keyword, userName, responseUrl) {
       blocks.push(...buildCategoryBlocks(row));
     }
 
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*복사용 URL 목록*' },
+    });
+    blocks.push(...buildCopyableSections(filtered));
+
     await postToResponseUrl(responseUrl, {
       response_type: 'in_channel',
       text: headerText,
@@ -228,6 +235,43 @@ function buildCategoryBlocks(row) {
     type: 'section',
     text: { type: 'mrkdwn', text },
   }));
+}
+
+function buildCopyableSections(filtered) {
+  const lines = [];
+  for (const row of filtered) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`[${row.category}]`);
+    for (const item of row.items) {
+      lines.push(`${item.name}: ${item.url}`);
+    }
+  }
+
+  const fenceOverhead = '```\n\n```'.length;
+  const limit = MAX_SECTION_TEXT - fenceOverhead;
+  const sections = [];
+  let buffer = [];
+  let bufferLen = 0;
+  for (const line of lines) {
+    const lineLen = line.length + 1;
+    if (bufferLen + lineLen > limit && buffer.length > 0) {
+      sections.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: '```\n' + buffer.join('\n') + '\n```' },
+      });
+      buffer = [];
+      bufferLen = 0;
+    }
+    buffer.push(line);
+    bufferLen += lineLen;
+  }
+  if (buffer.length > 0) {
+    sections.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '```\n' + buffer.join('\n') + '\n```' },
+    });
+  }
+  return sections;
 }
 
 async function postToResponseUrl(responseUrl, payload) {
